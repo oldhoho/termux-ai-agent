@@ -1,0 +1,9 @@
+__pycache__/
+*.pyc
+venv/
+.env
+web.log
+ui_*.xml
+ui_dump.txt
+token_usage.json
+*.bak*

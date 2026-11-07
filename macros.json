@@ -1,0 +1,32 @@
+{
+  "search_bilibili": {
+    "pkg": "tv.danmaku.bili",
+    "atoms": [
+      {
+        "atom": "open_app",
+        "pkg": "tv.danmaku.bili"
+      },
+      {
+        "atom": "tap_element",
+        "need": "search_entry",
+        "find": {
+          "region": "top",
+          "prefer": "wide_input"
+        }
+      },
+      {
+        "atom": "input_submit",
+        "need": "search_input",
+        "text": "{keyword}"
+      },
+      {
+        "atom": "tap_element",
+        "need": "result_list",
+        "find": {
+          "region": "content",
+          "prefer": "video_card"
+        }
+      }
+    ]
+  }
+}
