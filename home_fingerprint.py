@@ -54,15 +54,18 @@ def _has_search_text(texts):
     return False
 
 def dump_ui_xml(mcp):
+    import time as _time
+    start_t = _time.time()
     try:
-        mcp.run_shell(f"~/rish -c 'uiautomator dump {XML_REMOTE}'")
-        res = mcp.run_shell(f"~/rish -c 'cat {XML_REMOTE}'")
+        # 强制 3 秒超时，抓不到直接放弃
+        cmd = f"timeout 3 uiautomator dump {XML_REMOTE} > /dev/null 2>&1 && cat {XML_REMOTE}"
+        res = mcp.run_shell(f"~/rish -c '{cmd}'")
         raw = res.get("result", {}).get("structuredContent", {}).get("result", "")
-        if isinstance(raw, str) and "<hierarchy" in raw:
-            return raw
-        if isinstance(raw, dict):
-            raw = raw.get("result") or raw.get("output") or ""
-        return raw if isinstance(raw, str) else ""
+        
+        if not raw or "<hierarchy" not in raw:
+            print(f"      ⏱️ [性能] 读取 UI 树超时或失败")
+            return ""
+        return raw
     except Exception:
         return ""
 
@@ -396,46 +399,64 @@ def capture_and_extract(pkg, page_type, mcp):
         "elements": element_map
     }
 
-def add_manual_sample(pkg, page_type, features, res_data=None):
+def add_manual_sample(pkg, page_type, features, res_data=None, force=False):
+    # 🌟 核心修复：如果用户已经手动调整过（或者卡片已存在），默认不覆盖！
+    if not force:
+        anchors = load_anchors()
+        if pkg in anchors and anchors[pkg].get("mature"):
+            if page_type == "home":
+                return True
+            pt = load_page_types()
+            if pkg in pt and page_type in pt[pkg]:
+                return True
+    # 1. 确保 app_anchors.json 里有这个 App 的主卡片
     anchors = load_anchors()
     if pkg not in anchors:
         anchors[pkg] = {
             "display_name": pkg, "cold_start_cmd": f"monkey -p {pkg} -c android.intent.category.LAUNCHER 1",
             "bottom_region_ratio": 0.85, "top_region_ratio": 0.15,
-            "anchors": {"A": [], "B": [], "C": []}, "top_feature": {"A": {}, "B": [], "C": []}
+            "anchors": {"A": [], "B": [], "C": []}, 
+            "top_feature": {"A": {}, "B": [], "C": []},
+            "page_types": {} # 🌟 初始化页面类型归档
         }
+    if "page_types" not in anchors[pkg]:
+        anchors[pkg]["page_types"] = {}
 
-    # AI 提取的特征分级：最核心的放 A，次核心的放 B，其余的放 C（为了有的升降）
-    def split_features(feats):
-        if len(feats) >= 4:
-            return feats[:1], feats[1:3], feats[3:]
-        elif len(feats) >= 2:
-            return feats[:1], feats[1:], []
-        else:
-            return feats, [], []
-
-    a_feats, b_feats, c_feats = split_features(features)
-
+    # 2. 如果存的是首页，直接更新主卡片的 A/B/C 锚点
     if page_type == "home":
-        anchors[pkg]["anchors"]["A"] = a_feats
-        anchors[pkg]["anchors"]["B"] = b_feats
-        anchors[pkg]["anchors"]["C"] = c_feats
+        if len(features) >= 3:
+            anchors[pkg]["anchors"]["A"] = features[:2]
+            anchors[pkg]["anchors"]["B"] = features[2:]
+        else:
+            anchors[pkg]["anchors"]["A"] = features
+            anchors[pkg]["anchors"]["B"] = []
         if res_data and "elements" in res_data:
             anchors[pkg]["elements"] = res_data["elements"]
-        _save(ANCHORS_FILE, anchors)
-    
+        anchors[pkg]["mature"] = True
+        
+    # 3. 如果是其他页面，统一塞进 page_types 里面
     else:
+        # 🌟 核心修复：如果这个页面没建过，初始化字典，绝不覆盖已有数据
         pt = load_page_types()
         pkg_pt = pt.setdefault(pkg, {})
-        entry = pkg_pt.setdefault(page_type, {"elements": {}, "anchors": {"A": [], "B": [], "C": []}})
+        entry = pkg_pt.setdefault(page_type, {"anchors": {"A": [], "B": [], "C": []}, "elements": {}})
+        if "elements" not in entry: entry["elements"] = {}
         
-        entry["anchors"]["A"] = a_feats
-        entry["anchors"]["B"] = b_feats
-        entry["anchors"]["C"] = c_feats
+        if len(features) >= 3:
+            entry["anchors"]["A"] = features[:2]
+            entry["anchors"]["B"] = features[2:]
+        else:
+            entry["anchors"]["A"] = features
+            entry["anchors"]["B"] = []
+            
         if res_data and "elements" in res_data:
             entry["elements"] = res_data["elements"]
+        if res_data and "edges" in res_data:
+            entry["edges"] = res_data["edges"]
         entry["mature"] = True
         _save(PAGE_TYPES_FILE, pt)
+
+    _save(ANCHORS_FILE, anchors)
     
     state = load_state()
     state[pkg] = {"cold_start_required": False}
@@ -454,3 +475,146 @@ def get_current_pkg(mcp):
     except Exception:
         pass
     return ""
+
+
+def is_screen_on(mcp):
+    """通用检测：当前屏幕是否点亮且未锁屏（通过前台窗口判断）"""
+    try:
+        # 如果前台是锁屏界面（NotificationShade / Keyguard），直接判定为锁定状态
+        res = mcp.run_shell("~/rish -c 'dumpsys window | grep mCurrentFocus'")
+        raw = res.get("result", {}).get("structuredContent", {}).get("result", "")
+        # 如果前台是桌面启动器，也当做不活跃状态处理
+        if "NotificationShade" in raw or "StatusBar" in raw or "Keyguard" in raw or "launcher" in raw.lower():
+            return False
+            
+        # 再兜底查一次电源状态
+        res2 = mcp.run_shell("~/rish -c 'dumpsys power | grep mWakefulness'")
+        raw2 = res2.get("result", {}).get("structuredContent", {}).get("result", "")
+        if "mWakefulness=Asleep" in raw2 or "mWakefulness=0" in raw2:
+            return False
+            
+        return True
+    except Exception:
+        return True # 如果检测出异常，默认放行，避免因权限不足卡死流程
+
+
+def get_quick_texts(mcp):
+    """极轻量抓取，带降级和详细日志"""
+    try:
+        # 第一步：尝试正常抓取全量 XML
+        cmd = f"uiautomator dump {XML_REMOTE} > /dev/null 2>&1 && cat {XML_REMOTE}"
+        res = mcp.run_shell(f"~/rish -c '{cmd}'")
+        raw = res.get("result", {}).get("structuredContent", {}).get("result", "")
+        
+        # 如果抓到了，直接提取文字
+        if raw and "<hierarchy" in raw:
+            texts = re.findall(r'text="([^"]+)"', raw)
+            descs = re.findall(r'content-desc="([^"]+)"', raw)
+            all_strings = texts + descs
+            joined = " ".join(all_strings)
+            print(f"      🐞 [正常抓取] 提取到 {len(all_strings)} 个文本节点")
+            return joined
+            
+        # 第二步：如果抓取失败或者超时，走降级方案，直接用 dumpsys 拿窗口里的文字！
+        # dumpsys window windows 会包含很多文本，虽然乱，但不走 uiautomator，绝对不会卡死
+        print("      🐞 [降级抓取] uiautomator 超时，尝试通过 dumpsys 强行获取文字...")
+        res = mcp.run_shell("~/rish -c 'dumpsys window windows | grep -E \"mCurrentFocus|mFocusedApp\"'")
+        raw2 = res.get("result", {}).get("structuredContent", {}).get("result", "")
+        
+        # 提取所有可能是文字的片段
+        if raw2:
+            print(f"      🐞 [降级抓取] dumpsys 拿到部分信息，长度: {len(raw2)}")
+            return raw2
+            
+        print("      ❌ 致命错误：底层完全无法获取屏幕任何内容")
+        return ""
+    except Exception as e:
+        print(f"      ⚠️ 抓取异常: {e}")
+        return ""
+def classify_page_quick(pkg, mcp):
+    """严格页面判定：只认锚点卡里存的东西，不再模糊猜测"""
+    txt = get_quick_texts(mcp)
+    if not txt: return "unknown"
+    
+    cfg = load_anchors().get(pkg, {})
+    if not cfg: return "unknown"
+    
+    pt = load_page_types().get(pkg, {})
+    
+    # 1. 结果页判定：必须完整包含结果页的 A 级特征
+    result_feats = pt.get("result", {}).get("anchors", {}).get("A", [])
+    if result_feats and all(f in txt for f in result_feats):
+        return "result"
+        
+    # 2. 首页判定：必须完整包含首页的 A 级特征
+    home_feats = cfg.get("anchors", {}).get("A", [])
+    if home_feats and all(f in txt for f in home_feats):
+        return "home"
+        
+    # 3. 搜索页判定：必须完整包含搜索页的 A 级特征
+    search_feats = pt.get("search", {}).get("anchors", {}).get("A", [])
+    if search_feats and all(f in txt for f in search_feats):
+        return "search"
+        
+    # 如果全都不满足，就是 unknown（绝不给它瞎猜的机会）
+    return "unknown"
+def classify_page_ai(pkg, mcp):
+    """用 AI 极速判断页面类型，通用且准确"""
+    txt = get_quick_texts(mcp)
+    if not txt: return "unknown"
+    
+    # 截取前 300 个字符，足够 AI 判断了
+    txt_snippet = txt[:300].replace('"', '')
+    
+    prompt = f"""这是一个安卓App的屏幕文本。请判断这是什么页面：
+文本："{txt_snippet}"
+请只输出一个单词：home（首页）、search（搜索/结果页）、detail（视频/商品详情/播放页）、ad（广告/开屏/登录页）、unknown（其他）。
+"""
+    try:
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("dispatch", "/data/data/com.termux/files/home/termux-mcp/dispatch.py")
+        dispatch = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(dispatch)
+        res, _ = dispatch.ask_deepseek(prompt)
+        res = res.strip().lower().replace("'", "").replace('"', '')
+        
+        # 容错匹配
+        if "home" in res: return "home"
+        if "search" in res: return "search"
+        if "detail" in res: return "detail"
+        if "ad" in res: return "ad"
+        return "unknown"
+    except Exception as e:
+        print(f"      ⚠️ AI 裁判异常: {e}")
+        return "unknown"
+
+
+def dump_ui_debug(mcp):
+    """安全抓取用于调试：保存前 2000 字符，并提取干净的文字列表"""
+    cmd = f"uiautomator dump {XML_REMOTE} > /dev/null 2>&1 && cat {XML_REMOTE}"
+    res = mcp.run_shell(f"~/rish -c '{cmd}'")
+    raw = res.get("result", {}).get("structuredContent", {}).get("result", "")
+    
+    if not raw or "<hierarchy" not in raw:
+        print("❌ 调试抓取失败，未获得 XML 树")
+        return
+        
+    print(f"✅ 抓取成功，XML 总长度: {len(raw)} 字符")
+    
+    # 保存到文件供你查看
+    with open("/data/data/com.termux/files/home/termux-mcp/ui_debug.xml", "w", encoding="utf-8") as f:
+        f.write(raw)
+    print("📁 XML 已保存至 ~/termux-mcp/ui_debug.xml")
+    
+    # 提取干净的文字
+    texts = re.findall(r'text="([^"]+)"', raw)
+    descs = re.findall(r'content-desc="([^"]+)"', raw)
+    
+    all_texts = [t for t in texts if t.strip()] + [d for d in descs if d.strip()]
+    
+    print(f"📊 共提取到 {len(all_texts)} 个有效文本节点")
+    print("=" * 40)
+    print("前 50 个节点内容如下：")
+    for i, t in enumerate(all_texts[:50]):
+        print(f"  [{i}] {t}")
+    print("=" * 40)

@@ -2,5 +2,12 @@
   "deepseek": "com.deepseek.chat",
   "b站": "tv.danmaku.bili",
   "微信": "com.tencent.mm",
-  "抖音": "com.ss.android.ugc.aweme"
+  "抖音": "com.ss.android.ugc.aweme",
+  "taptap": "com.taptap",
+  "哔哩哔哩": "tv.danmaku.bili",
+  "bilibili": "tv.danmaku.bili",
+  "设置": "com.android.settings",
+  "系统设置": "com.android.settings",
+  "qq": "com.tencent.mobileqq",
+  "qq音乐": "com.tencent.qqmusic"
 }

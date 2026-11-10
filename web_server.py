@@ -314,7 +314,9 @@ def anchors_page():
                     
                     cards_html += '<div style="margin-top:15px; padding-top:10px; border-top:1px dashed #444;">'
                     cards_html += '<div style="display:flex; justify-content:space-between; margin-bottom:6px;">'
-                    cards_html += '<b>自定义页面 [' + pt + ']:</b>'
+                    display_names = {"search": "搜索页", "result": "结果页", "profile": "个人主页"}
+                    pt_name = display_names.get(pt, pt)
+                    cards_html += '<b>页面 [' + pt_name + ']:</b>'
                     cards_html += '<button class="btn danger" style="padding:2px 8px;font-size:12px;" onclick="delPage(\'' + pkg + '\', \'' + pt + '\')">× 删除该页</button>'
                     cards_html += '</div>'
                     
