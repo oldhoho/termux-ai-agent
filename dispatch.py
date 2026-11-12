@@ -436,6 +436,15 @@ class MCP:
                 _stat(f"mcp:{tool}", _time_mod.time() - _t0)
         return self._post({"jsonrpc":"2.0","id":req_id,"method":"tools/call","params":{"name":tool,"arguments":args}})
 
+def _is_keyboard_shown(mcp):
+    """系统级判断键盘是否弹出（mInputShown）。键盘弹=已有输入焦点，通用不依赖 App。"""
+    try:
+        r = mcp.run_shell("~/rish -c 'dumpsys input_method | grep mInputShown'")
+        raw = r.get("result", {}).get("structuredContent", {}).get("result", "")
+        return "mInputShown=true" in raw
+    except Exception:
+        return False
+
 def ask_deepseek(user_text, system=None):
     if not DEEPSEEK_KEY: sys.exit("错误: 未设置 DEEPSEEK_API_KEY")
     _ad_t0 = _time_mod.time()
@@ -567,6 +576,11 @@ def dismiss_ads(mcp, max_rounds=1, pkg=None):
 
 def safe_launch(mcp, pkg):
     ensure_pkg_enabled(mcp, pkg)
+    # 已在前台：不重新拉起、不扫广告（避免重置当前页/误点元素）
+    _cur0 = hf.get_current_pkg(mcp)
+    if _cur0 and pkg in _cur0:
+        hf.invalidate_quick_cache()
+        return True
     mcp.run_shell(f"~/rish -c 'monkey -p {pkg} -c android.intent.category.LAUNCHER 1'")
     _tsleep(2.5)
     dismiss_ads(mcp, pkg=pkg)
@@ -619,8 +633,11 @@ def _run_macro(tool, macro, pkg, args, mcp):
                 mcp.run_shell(f"~/rish -c 'input tap {_cur_xy[0]} {_cur_xy[1]}'")
                 _tsleep(0.3)
             else:
-                print(f"       当前屏幕没找到 {el_name}，中止（不盲点）")
-                return False
+                if _is_keyboard_shown(mcp):
+                    print(f"       没找到 {el_name}，但键盘已弹出，跳过点击直接输入")
+                else:
+                    print(f"       当前屏幕没找到 {el_name}，中止（不盲点）")
+                    return False
         elif a == "tap":
             fx, fy = atom.get("xy", [0.5, 0.5])
             mcp.run_shell(f"~/rish -c 'input tap {int(W*fx)} {int(H*fy)}'")
@@ -629,21 +646,29 @@ def _run_macro(tool, macro, pkg, args, mcp):
         elif a == "input_submit":
             text = atom.get("text", "").replace("{keyword}", args.get("keyword", ""))
             print(f"      -> 准备输入: {text}")
-            # 1) 先点当前页 EditText 的真实中心（聚焦输入框，不硬编码坐标）
-            _ed_cx, _ed_cy = int(W * 0.5), int(H * 0.08)
-            try:
-                _xml_in = hf.dump_ui_xml(mcp)
-                if _xml_in:
-                    for _n in hf.parse_nodes(_xml_in):
-                        if "edittext" in (_n.get("class") or "").lower():
-                            _ed_cx, _ed_cy = _n["cx"], _n["cy"]
-                            print(f"       聚焦 EditText @ ({_ed_cx},{_ed_cy}) cls={_n.get('class')} rid={_n.get('resource_id')} text={repr(_n['text'][:20])} bounds={_n['bounds']}")
-                            break
-            except Exception:
-                pass
-            mcp.run_shell(f"~/rish -c 'input tap {_ed_cx} {_ed_cy}'")
-            _tsleep(0.4)
-            # 2) 全选 + 粘贴 + 回车
+            _kbd = _is_keyboard_shown(mcp)
+            if _kbd:
+                # 键盘已弹  已有输入焦点（VIA 类），跳过 dump/tap，直接粘贴回车
+                print("       键盘已弹，跳过聚焦，直接粘贴")
+            else:
+                # 键盘没弹  找 EditText 聚焦（TapTap 类）
+                _ed_cx, _ed_cy = int(W * 0.5), int(H * 0.08)
+                try:
+                    _xml_in = hf.dump_ui_xml(mcp)
+                    if _xml_in:
+                        for _n in hf.parse_nodes(_xml_in):
+                            if "edittext" in (_n.get("class") or "").lower():
+                                _ed_cx, _ed_cy = _n["cx"], _n["cy"]
+                                print(f"       聚焦 EditText @ ({_ed_cx},{_ed_cy}) cls={_n.get('class')} rid={_n.get('resource_id')} text={repr(_n['text'][:20])} bounds={_n['bounds']}")
+                                break
+                    else:
+                        print("       dump 失败且键盘未弹，无法可靠定位输入框，中止")
+                        return
+                except Exception:
+                    pass
+                mcp.run_shell(f"~/rish -c 'input tap {_ed_cx} {_ed_cy}'")
+                _tsleep(0.4)
+            # 全选 + 粘贴 + 回车
             mcp.call("clipboard", {"action": "write", "text": text})
             _tsleep(0.1)
             cmd_all = "input keycombination 113 29 && input keyevent 279 && input keyevent 66"
@@ -801,8 +826,17 @@ def main():
                 pt = hf.classify_page_quick(pkg, mcp, skip_fallback=True)
                 print(f"   -> 识别结果: {pt}")
                 if pt in ["home", "search"]:
-                    located = True
-                    break
+                    if pt == "home":
+                        _ai_pt = hf.classify_page_ai(pkg, mcp)
+                        if _ai_pt not in ("home", "unknown"):
+                            print(f"    quick 判 home，AI 复核为 {_ai_pt}，继续退避")
+                            pt = _ai_pt
+                        else:
+                            located = True
+                            break
+                    else:
+                        located = True
+                        break
                 current_pkg = hf.get_current_pkg(mcp)
                 if not current_pkg or pkg not in current_pkg:
                     if not hf.is_screen_on(mcp):
@@ -1318,9 +1352,14 @@ def main():
             _profile_hint = ""
             if _profile:
                 _profile_hint = f"（App类型：{_profile.get('app_kind')}，内容卡：{_profile.get('content_kind')}）"
-            _prompt = f"""用户在 {app_name} 的 {target_page} 页问：{question}{_profile_hint}
+            _prompt = f"""用户在 {app_name} 的当前页面问：{question}{_profile_hint}
 页面内容：{_joined}
-请用中文简洁总结页面内容，回答用户问题。只基于页面内容，不要编造。"""
+
+请根据页面内容的实际结构回答用户：
+1. 如果页面是列表/榜单（如 1. xxx  2. xxx），请直接逐条列出，不要合并。
+2. 如果页面是文章详情，请分段总结。
+3. 如果页面是聚合卡片（上面一条大卡片，下面一个列表），请分别总结。
+只基于页面内容，不要编造。"""
             try:
                 _summary, _ = ask_deepseek(_prompt, system="你是信息总结助手，只基于给定页面内容回答，不编造。")
             except Exception as e:

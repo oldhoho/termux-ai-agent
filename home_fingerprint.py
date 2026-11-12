@@ -515,32 +515,58 @@ def get_current_pkg(mcp):
 
 
 _SCREEN_ON_CACHE = {"ts": 0.0, "val": True}
+_LAST_UNLOCK_TIME = 0.0
 _SCREEN_ON_TTL = 2.0
 
 def is_screen_on(mcp):
-    """通用检测：当前屏幕是否点亮且未锁屏（0.5s TTL 缓存）"""
+    """通用检测：当前屏幕是否点亮且未锁屏（包含解锁缓冲期，防死机）"""
     import time as _t
+    global _LAST_UNLOCK_TIME
     now = _t.time()
-    if now - _SCREEN_ON_CACHE["ts"] < _SCREEN_ON_TTL:
-        return _SCREEN_ON_CACHE["val"]
+    if now - _SCREEN_ON_CACHE.get("ts", 0) < _SCREEN_ON_TTL:
+        return _SCREEN_ON_CACHE.get("val", False)
     def _raw(cmd):
         try:
             return mcp.call("execute_command", {"command": cmd}, req_id=99)
         except Exception:
             return {}
     try:
-        # 只查 isKeyguardShowing（唯一可靠信号，省一次 dumpsys）
+        # 1. 检查是否在锁屏界面
         res = _raw("~/rish -c 'dumpsys window | grep isKeyguardShowing'")
         raw = res.get("result", {}).get("structuredContent", {}).get("result", "") or ""
         if "isKeyguardShowing=true" in raw:
-            _SCREEN_ON_CACHE["ts"] = now
             _SCREEN_ON_CACHE["val"] = False
+            _SCREEN_ON_CACHE["ts"] = now
             return False
-        _SCREEN_ON_CACHE["ts"] = now
+            
+        # 2. 检查屏幕是否点亮（防止黑屏但有其他窗口）
+        res_power = _raw("~/rish -c 'dumpsys power | grep mWakefulness='")
+        raw_power = res_power.get("result", {}).get("structuredContent", {}).get("result", "") or ""
+        if "Awake" not in raw_power:
+            _SCREEN_ON_CACHE["val"] = False
+            _SCREEN_ON_CACHE["ts"] = now
+            return False
+
+        # 3. 解锁缓冲期（关键防死机逻辑）
+        if now - _LAST_UNLOCK_TIME < 2.0:
+            _SCREEN_ON_CACHE["val"] = False
+            _SCREEN_ON_CACHE["ts"] = now
+            return False
+
+        if not _SCREEN_ON_CACHE.get("was_unlocked", False):
+            _SCREEN_ON_CACHE["was_unlocked"] = True
+            _LAST_UNLOCK_TIME = now
+            _SCREEN_ON_CACHE["val"] = False
+            _SCREEN_ON_CACHE["ts"] = now
+            return False
+
         _SCREEN_ON_CACHE["val"] = True
+        _SCREEN_ON_CACHE["ts"] = now
         return True
     except Exception:
-        return True
+        _SCREEN_ON_CACHE["val"] = False
+        _SCREEN_ON_CACHE["ts"] = now
+        return False
 
 _QUICK_TEXTS_CACHE = {"ts": 0.0, "text": ""}
 _QUICK_TTL = 1.5
@@ -719,13 +745,15 @@ def _classify_from_text(pkg, txt):
     pt = load_page_types().get(pkg, {})
 
     # 1. 首页判定优先（home 是基础页面，A 级和 result 重叠时 home 优先）
+    _home_hit = False
     home_feats = cfg.get("anchors", {}).get("A", [])
     if home_feats:
         miss = [f for f in home_feats if f not in txt]
         if not miss:
             print(f"       [判定] home 命中 A级={home_feats}")
-            return "home"
-        print(f"       [判定] home 缺{miss}")
+            _home_hit = True
+        else:
+            print(f"       [判定] home 缺{miss}")
 
     # 2. 遍历所有 page_type（result/player/detail/search...），A 级全命中即返回
     for ptype, pdata in pt.items():
@@ -739,6 +767,8 @@ def _classify_from_text(pkg, txt):
         print(f"       [判定] {ptype} 缺{miss}")
 
     print(f"       [判定] 所有 page_type A级均未全命中  unknown")
+    if _home_hit:
+        return "home"
     return "unknown"
 
 def classify_page_ai(pkg, mcp):
