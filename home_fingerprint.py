@@ -519,9 +519,8 @@ _LAST_UNLOCK_TIME = 0.0
 _SCREEN_ON_TTL = 2.0
 
 def is_screen_on(mcp):
-    """通用检测：当前屏幕是否点亮且未锁屏（包含解锁缓冲期，防死机）"""
+    """带重试的锁屏检测，防止误判"""
     import time as _t
-    global _LAST_UNLOCK_TIME
     now = _t.time()
     if now - _SCREEN_ON_CACHE.get("ts", 0) < _SCREEN_ON_TTL:
         return _SCREEN_ON_CACHE.get("val", False)
@@ -531,42 +530,24 @@ def is_screen_on(mcp):
         except Exception:
             return {}
     try:
-        # 1. 检查是否在锁屏界面
-        res = _raw("~/rish -c 'dumpsys window | grep isKeyguardShowing'")
-        raw = res.get("result", {}).get("structuredContent", {}).get("result", "") or ""
-        if "isKeyguardShowing=true" in raw:
-            _SCREEN_ON_CACHE["val"] = False
-            _SCREEN_ON_CACHE["ts"] = now
-            return False
-            
-        # 2. 检查屏幕是否点亮（防止黑屏但有其他窗口）
-        res_power = _raw("~/rish -c 'dumpsys power | grep mWakefulness='")
-        raw_power = res_power.get("result", {}).get("structuredContent", {}).get("result", "") or ""
-        if "Awake" not in raw_power:
-            _SCREEN_ON_CACHE["val"] = False
-            _SCREEN_ON_CACHE["ts"] = now
-            return False
-
-        # 3. 解锁缓冲期（关键防死机逻辑）
-        if now - _LAST_UNLOCK_TIME < 2.0:
-            _SCREEN_ON_CACHE["val"] = False
-            _SCREEN_ON_CACHE["ts"] = now
-            return False
-
-        if not _SCREEN_ON_CACHE.get("was_unlocked", False):
-            _SCREEN_ON_CACHE["was_unlocked"] = True
-            _LAST_UNLOCK_TIME = now
-            _SCREEN_ON_CACHE["val"] = False
-            _SCREEN_ON_CACHE["ts"] = now
-            return False
-
-        _SCREEN_ON_CACHE["val"] = True
-        _SCREEN_ON_CACHE["ts"] = now
-        return True
-    except Exception:
+        # 最多重试 2 次，每次间隔 0.3 秒，防止通知栏/全屏切换导致的瞬间误判
+        for _retry in range(2):
+            res = _raw("~/rish -c 'dumpsys window | grep isKeyguardShowing'")
+            raw = res.get("result", {}).get("structuredContent", {}).get("result", "") or ""
+            if "isKeyguardShowing=true" not in raw:
+                _SCREEN_ON_CACHE["val"] = True
+                _SCREEN_ON_CACHE["ts"] = now
+                return True
+            _t.sleep(0.3)
+        
+        # 两次都是 true，说明真锁屏了
         _SCREEN_ON_CACHE["val"] = False
         _SCREEN_ON_CACHE["ts"] = now
         return False
+    except Exception:
+        _SCREEN_ON_CACHE["val"] = True  # 报错时直接放行，防止卡死
+        _SCREEN_ON_CACHE["ts"] = now
+        return True
 
 _QUICK_TEXTS_CACHE = {"ts": 0.0, "text": ""}
 _QUICK_TTL = 1.5

@@ -119,7 +119,7 @@ PROMPT_PREFIX = '''你是手机操作调度器。只输出 JSON 数组，不解�
    - `operate`：用户要执行操作（点按钮、发消息、播放等）。
    - `open_only`：只打开 App。
 1. 只要用户要求“在某个App里搜xx”，输出 `[{"tool": "universal_search", "args": {"app_name": "App名", "keyword": "核心搜索词"}}]`。
-2. **用户的意图是“进去/打开/播放/查看”某个搜索结果（含群、视频、聊天、商品）时**，必须组合动作：`[{"tool": "universal_search", "args": {"app_name": "App名", "keyword": "搜索词"}}, {"tool": "click_first_result", "args": {"pkg": "App名"}}]`。`click_first_result` 不要传 index，内部用 AI 从候选里选。
+2. **用户的意图是进去/打开/播放/查看/找/听/看某个具体内容或分类（如：听歌、看相声、找游戏、搜新闻）时**，必须组合动作：`[{"tool": "universal_search", "args": {"app_name": "App名", "keyword": "核心搜索词"}}, {"tool": "click_first_result", "args": {"pkg": "App名"}}]`。`click_first_result` 不要传 index，内部用 AI 从候选里选。
 3. **用户要浏览/挑选 App 首页内容（不指定具体搜索词）时**，必须 `open_app` + `click_first_result`，且 `target_page="home"`：`[{"tool": "open_app", "args": {"package_or_action": "App名"}}, {"tool": "click_first_result", "args": {"pkg": "App名", "target_page": "home"}}]`。
 4. 搜索后点结果，`click_first_result` 的 `target_page="result"`（默认，可省略）。
 **禁止在 click_first_result 的 args 里传 index，传了也会被忽略。用户说的“第 N 个”由 click_first_result 内部的 AI 从候选里判断。**
